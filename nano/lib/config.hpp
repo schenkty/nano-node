@@ -59,11 +59,11 @@ public:
 	current_network (network_a)
 	{
 		// Local work threshold for rate-limiting publishing blocks. ~5 seconds of work.
-		uint64_t constexpr publish_test_threshold = 0xff00000000000000;
-		uint64_t constexpr publish_full_threshold = 0xffffffc000000000;
+		uint64_t constexpr publish_test_threshold = 0;
+		uint64_t constexpr publish_full_threshold = 0;
 		publish_threshold = is_test_network () ? publish_test_threshold : publish_full_threshold;
 
-		default_node_port = is_live_network () ? 7075 : is_beta_network () ? 54000 : 44000;
+		default_node_port = is_live_network () ? 7070 : is_beta_network () ? 54000 : 44000;
 		default_rpc_port = is_live_network () ? 7076 : is_beta_network () ? 55000 : 45000;
 		default_ipc_port = is_live_network () ? 7077 : is_beta_network () ? 56000 : 46000;
 		default_websocket_port = is_live_network () ? 7078 : is_beta_network () ? 57000 : 47000;
