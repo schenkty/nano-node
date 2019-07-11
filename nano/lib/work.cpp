@@ -114,8 +114,8 @@ void nano::work_pool::loop (uint64_t thread)
 			if (ticket == ticket_l)
 			{
 				// If the ticket matches what we started with, we're the ones that found the solution
-				assert (output >= network_constants.publish_threshold);
-				assert (work_value (current_l.item, work) == output);
+				assert (output >= current_l.difficulty);
+				assert (current_l.difficulty == 0 || work_value (current_l.item, work) == output);
 				// Signal other threads to stop their work next time they check ticket
 				++ticket;
 				pending.pop_front ();
@@ -224,7 +224,7 @@ std::unique_ptr<seq_con_info_component> collect_seq_con_info (work_pool & work_p
 
 	size_t count = 0;
 	{
-		std::lock_guard<std::mutex> (work_pool.mutex);
+		std::lock_guard<std::mutex> guard (work_pool.mutex);
 		count = work_pool.pending.size ();
 	}
 	auto sizeof_element = sizeof (decltype (work_pool.pending)::value_type);

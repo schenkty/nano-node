@@ -2,6 +2,7 @@
 
 #include <nano/lib/config.hpp>
 #include <nano/secure/common.hpp>
+
 #include <stack>
 
 namespace nano
@@ -187,22 +188,25 @@ private:
 
 class block_predecessor_set;
 
-class read_transaction_impl
+class transaction_impl
 {
 public:
-	virtual ~read_transaction_impl () = default;
-	virtual void reset () const = 0;
-	virtual void renew () const = 0;
+	virtual ~transaction_impl () = default;
 	virtual void * get_handle () const = 0;
 };
 
-class write_transaction_impl
+class read_transaction_impl : public transaction_impl
 {
 public:
-	virtual ~write_transaction_impl () = default;
+	virtual void reset () const = 0;
+	virtual void renew () const = 0;
+};
+
+class write_transaction_impl : public transaction_impl
+{
+public:
 	virtual void commit () const = 0;
 	virtual void renew () = 0;
-	virtual void * get_handle () const = 0;
 };
 
 class transaction
@@ -223,6 +227,7 @@ public:
 	void * get_handle () const override;
 	void reset () const;
 	void renew () const;
+	void refresh () const;
 
 private:
 	std::unique_ptr<nano::read_transaction_impl> impl;
@@ -276,6 +281,7 @@ public:
 	virtual size_t account_count (nano::transaction const &) = 0;
 	virtual void confirmation_height_clear (nano::transaction const &, nano::account const & account, nano::account_info const & account_info) = 0;
 	virtual void confirmation_height_clear (nano::transaction const &) = 0;
+	virtual uint64_t cemented_count (nano::transaction const &) = 0;
 	virtual nano::store_iterator<nano::account, nano::account_info> latest_v0_begin (nano::transaction const &, nano::account const &) = 0;
 	virtual nano::store_iterator<nano::account, nano::account_info> latest_v0_begin (nano::transaction const &) = 0;
 	virtual nano::store_iterator<nano::account, nano::account_info> latest_v0_end () = 0;
@@ -302,6 +308,7 @@ public:
 
 	virtual bool block_info_get (nano::transaction const &, nano::block_hash const &, nano::block_info &) const = 0;
 	virtual nano::uint128_t block_balance (nano::transaction const &, nano::block_hash const &) = 0;
+	nano::uint128_t block_balance_calculated (std::shared_ptr<nano::block>, nano::block_sideband const &) const;
 	virtual nano::epoch block_version (nano::transaction const &, nano::block_hash const &) = 0;
 
 	virtual nano::uint128_t representation_get (nano::transaction const &, nano::account const &) = 0;
@@ -352,6 +359,7 @@ public:
 	virtual nano::store_iterator<nano::endpoint_key, nano::no_value> peers_end () = 0;
 
 	virtual uint64_t block_account_height (nano::transaction const & transaction_a, nano::block_hash const & hash_a) const = 0;
+	virtual void serialize_mdb_tracker (boost::property_tree::ptree &, std::chrono::milliseconds, std::chrono::milliseconds) = 0;
 
 	/** Start read-write transaction */
 	virtual nano::write_transaction tx_begin_write () = 0;

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <nano/node/common.hpp>
+#include <nano/node/transport/transport.hpp>
+
 #include <boost/asio.hpp>
 #include <boost/multi_index/hashed_index.hpp>
 #include <boost/multi_index/mem_fun.hpp>
@@ -7,10 +10,9 @@
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/random_access_index.hpp>
 #include <boost/multi_index_container.hpp>
+
 #include <chrono>
 #include <memory>
-#include <nano/node/common.hpp>
-#include <nano/node/transport/transport.hpp>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -127,6 +129,9 @@ private:
 
 	/** When a rep request is made, this is called to update the last-request timestamp. */
 	void on_rep_request (std::shared_ptr<nano::transport::channel> channel_a);
+
+	/** Clean representatives with inactive channels */
+	void cleanup_reps ();
 
 	/** Protects the probable_reps container */
 	mutable std::mutex probable_reps_mutex;

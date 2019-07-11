@@ -2,6 +2,7 @@ if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 	# No opencl
 elseif (${CMAKE_SYSTEM_NAME} MATCHES "Windows")
 	set (platform_sources plat/windows/openclapi.cpp)
+	set (psapi_lib Psapi)
 elseif (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
 	set (platform_sources plat/posix/openclapi.cpp)
 elseif (${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
@@ -27,6 +28,12 @@ add_library (node
 	confirmation_height_processor.cpp
 	daemonconfig.hpp
 	daemonconfig.cpp
+	diagnosticsconfig.hpp
+	diagnosticsconfig.cpp
+	election.hpp
+	election.cpp
+	gap_cache.hpp
+	gap_cache.cpp
 	ipc.hpp
 	ipc.cpp
 	ipcconfig.hpp
@@ -37,8 +44,12 @@ add_library (node
 	json_payment_observer.cpp
 	lmdb.hpp
 	lmdb.cpp
+	lmdb_txn_tracker.hpp
+	lmdb_txn_tracker.cpp
 	logging.hpp
 	logging.cpp
+	network.hpp
+	network.cpp
 	nodeconfig.hpp
 	nodeconfig.cpp
 	node_observers.hpp
@@ -47,6 +58,8 @@ add_library (node
 	node_rpc_config.cpp
 	node.hpp
 	node.cpp
+	online_reps.hpp
+	online_reps.cpp
 	openclconfig.hpp
 	openclconfig.cpp
 	openclwork.hpp
@@ -67,8 +80,10 @@ add_library (node
 	transport/udp.cpp
 	signatures.hpp
 	signatures.cpp
-	stats.hpp
-	stats.cpp
+	socket.hpp
+	socket.cpp
+	vote_processor.hpp
+	vote_processor.cpp
 	voting.hpp
 	voting.cpp
 	wallet.hpp
@@ -77,7 +92,8 @@ add_library (node
 	websocket.cpp
 	websocketconfig.hpp
 	websocketconfig.cpp
-	working.hpp
+	write_database_queue.hpp
+	write_database_queue.cpp
 	xorshift.hpp)
 
 target_link_libraries (node
@@ -95,6 +111,7 @@ target_link_libraries (node
 	Boost::thread
 	Boost::boost
 	${CMAKE_DL_LIBS}
+	${psapi_lib}
 	)
 
 target_compile_definitions(node

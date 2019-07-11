@@ -1,16 +1,3 @@
-#include <algorithm>
-#include <boost/array.hpp>
-#include <boost/bind.hpp>
-#include <boost/endian/conversion.hpp>
-#include <boost/polymorphic_cast.hpp>
-#include <boost/property_tree/json_parser.hpp>
-#include <boost/property_tree/ptree.hpp>
-#include <boost/thread/thread_time.hpp>
-#include <chrono>
-#include <cstdio>
-#include <fstream>
-#include <future>
-#include <iostream>
 #include <nano/lib/config.hpp>
 #include <nano/lib/ipc.hpp>
 #include <nano/lib/timer.hpp>
@@ -18,6 +5,21 @@
 #include <nano/node/ipc.hpp>
 #include <nano/node/json_handler.hpp>
 #include <nano/node/node.hpp>
+
+#include <boost/array.hpp>
+#include <boost/bind.hpp>
+#include <boost/endian/conversion.hpp>
+#include <boost/polymorphic_cast.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/thread/thread_time.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <fstream>
+#include <future>
+#include <iostream>
 #include <thread>
 
 using namespace boost::log;
@@ -127,6 +129,9 @@ public:
 		// Note that if the rpc action is async, the shared_ptr<json_handler> lifetime will be extended by the action handler
 		auto handler (std::make_shared<nano::json_handler> (node, server.node_rpc_config, body, response_handler_l, [& server = server]() {
 			server.stop ();
+			server.node.alarm.add (std::chrono::steady_clock::now () + std::chrono::seconds (3), [& io_ctx = server.node.alarm.io_ctx]() {
+				io_ctx.stop ();
+			});
 		}));
 		// For unsafe actions to be allowed, the unsafe encoding must be used AND the transport config must allow it
 		handler->process_request (allow_unsafe && config_transport.allow_unsafe);
@@ -256,7 +261,7 @@ public:
 				server.node.logger.always_log ("IPC: acceptor error: ", ec.message ());
 			}
 
-			if (acceptor->is_open () && ec != boost::asio::error::operation_aborted)
+			if (ec != boost::asio::error::operation_aborted && acceptor->is_open ())
 			{
 				this->accept ();
 			}

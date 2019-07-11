@@ -1,17 +1,15 @@
-#include <nano/node/wallet.hpp>
-
 #include <nano/crypto_lib/random_pool.hpp>
 #include <nano/lib/utility.hpp>
 #include <nano/node/node.hpp>
 #include <nano/node/wallet.hpp>
 #include <nano/node/xorshift.hpp>
 
-#include <argon2.h>
-
 #include <boost/filesystem.hpp>
 #include <boost/polymorphic_cast.hpp>
 
 #include <future>
+
+#include <argon2.h>
 
 nano::uint256_union nano::wallet_store::check (nano::transaction const & transaction_a)
 {
@@ -116,7 +114,7 @@ void nano::wallet_store::deterministic_clear (nano::transaction const & transact
 		{
 			case nano::key_type::deterministic:
 			{
-				nano::uint256_union key (i->first);
+				nano::uint256_union const & key (i->first);
 				erase (transaction_a, key);
 				i = begin (transaction_a, key);
 				break;
@@ -370,7 +368,7 @@ std::vector<nano::account> nano::wallet_store::accounts (nano::transaction const
 	std::vector<nano::account> result;
 	for (auto i (begin (transaction_a)), n (end ()); i != n; ++i)
 	{
-		nano::account account (i->first);
+		nano::account const & account (i->first);
 		result.push_back (account);
 	}
 	return result;
@@ -442,7 +440,7 @@ nano::wallet_value nano::wallet_store::entry_get_raw (nano::transaction const & 
 
 void nano::wallet_store::entry_put_raw (nano::transaction const & transaction_a, nano::public_key const & pub_a, nano::wallet_value const & entry_a)
 {
-	auto status (mdb_put (tx (transaction_a), handle, nano::mdb_val (pub_a), entry_a.val (), 0));
+	auto status (mdb_put (tx (transaction_a), handle, nano::mdb_val (pub_a), nano::mdb_val (sizeof (entry_a), const_cast<nano::wallet_value *> (&entry_a)), 0));
 	assert (status == 0);
 }
 
@@ -650,7 +648,7 @@ void nano::wallet_store::upgrade_v1_v2 (nano::transaction const & transaction_a)
 	empty_password.decrypt (value.key, kdf, salt (transaction_a).owords[0]);
 	for (auto i (begin (transaction_a)), n (end ()); i != n; ++i)
 	{
-		nano::public_key key (i->first);
+		nano::public_key const & key (i->first);
 		nano::raw_key prv;
 		if (fetch (transaction_a, key, prv))
 		{
@@ -1240,7 +1238,7 @@ bool nano::wallet::search_pending ()
 		for (auto i (store.begin (transaction)), n (store.end ()); i != n; ++i)
 		{
 			auto block_transaction (wallets.node.store.tx_begin_read ());
-			nano::account account (i->first);
+			nano::account const & account (i->first);
 			// Don't search pending for watch-only accounts
 			if (!nano::wallet_value (i->second).key.is_zero ())
 			{
@@ -1412,13 +1410,18 @@ void nano::work_watcher::run ()
 		next_attempt = std::chrono::steady_clock::now () + std::chrono::seconds (5);
 		for (auto i (blocks.begin ()), n (blocks.end ()); i != n;)
 		{
-			std::unique_lock<std::mutex> lock (node.active.mutex);
+			std::unique_lock<std::mutex> active_lock (node.active.mutex);
 			auto confirmed (false);
-			auto existing (node.active.roots.find ((i->second)->qualified_root ()));
+			auto existing (node.active.roots.find (i->first));
 			if (node.active.roots.end () != existing)
 			{
 				//block may not be in existing yet
 				confirmed = existing->election->confirmed.load ();
+			}
+			else if (i->second == nullptr)
+			{
+				// removed
+				confirmed = true;
 			}
 			else
 			{
@@ -1430,7 +1433,7 @@ void nano::work_watcher::run ()
 					confirmed = this->node.block_confirmed_or_being_confirmed (transaction, (i->second)->hash ());
 				}
 			}
-			lock.unlock ();
+			active_lock.unlock ();
 
 			if (confirmed)
 			{
@@ -1444,36 +1447,57 @@ void nano::work_watcher::run ()
 		for (auto & i : blocks)
 		{
 			uint64_t difficulty (0);
-			nano::work_validate (i.second->root (), i.second->block_work (), &difficulty);
-			if (node.active.active_difficulty () > difficulty)
+			nano::block_hash root (0);
+			if (i.second != nullptr)
 			{
-				lock.unlock ();
+				root = i.second->root ();
+				nano::work_validate (root, i.second->block_work (), &difficulty);
+			}
+			if (node.active.active_difficulty () > difficulty && i.second != nullptr)
+			{
+				auto qualified_root = i.second->qualified_root ();
+				auto hash = i.second->hash ();
 				nano::state_block_builder builder;
 				std::error_code ec;
 				builder.from (*i.second);
-				builder.work (node.work_generate_blocking (i.second->root (), node.active.active_difficulty ()));
+				lock.unlock ();
+				builder.work (node.work_generate_blocking (root, node.active.active_difficulty ()));
 				std::shared_ptr<state_block> block (builder.build (ec));
 				if (!ec)
 				{
 					{
 						std::lock_guard<std::mutex> active_lock (node.active.mutex);
-						auto existing (node.active.roots.find (i.second->qualified_root ()));
+						auto existing (node.active.roots.find (qualified_root));
 						if (existing != node.active.roots.end ())
 						{
 							auto election (existing->election);
-							if (election->status.winner->hash () == i.second->hash ())
+							if (election->status.winner->hash () == hash)
 							{
 								election->status.winner = block;
 							}
-							auto current (election->blocks.find (block->hash ()));
+							auto current (election->blocks.find (hash));
 							assert (current != election->blocks.end ());
 							current->second = block;
 						}
 					}
 					node.network.flood_block (block);
 					node.active.update_difficulty (*block.get ());
+					lock.lock ();
+					if (stopped)
+					{
+						break;
+					}
+					if (i.second != nullptr)
+					{
+						i.second = block;
+					}
+					lock.unlock ();
 				}
 				lock.lock ();
+				if (stopped)
+				{
+					break;
+				}
 			}
 		}
 	} // !stopped
@@ -1487,6 +1511,24 @@ void nano::work_watcher::add (std::shared_ptr<nano::block> block_a)
 		std::lock_guard<std::mutex> lock (mutex);
 		blocks[block_l->qualified_root ()] = block_l;
 	}
+}
+
+void nano::work_watcher::remove (std::shared_ptr<nano::block> block_a)
+{
+	auto root (block_a->qualified_root ());
+	std::lock_guard<std::mutex> lock (mutex);
+	auto existing (blocks.find (root));
+	if (existing != blocks.end () && existing->second->hash () == block_a->hash ())
+	{
+		existing->second = nullptr;
+	}
+}
+
+bool nano::work_watcher::is_watched (nano::qualified_root const & root_a)
+{
+	std::unique_lock<std::mutex> lock (mutex);
+	auto exists (blocks.find (root_a));
+	return exists != blocks.end ();
 }
 
 void nano::wallets::do_wallet_actions ()
@@ -1516,7 +1558,7 @@ void nano::wallets::do_wallet_actions ()
 	}
 }
 
-nano::wallets::wallets (bool & error_a, nano::node & node_a) :
+nano::wallets::wallets (bool error_a, nano::node & node_a) :
 observer ([](bool) {}),
 node (node_a),
 env (boost::polymorphic_downcast<nano::mdb_wallets_store *> (node_a.wallets_store_impl.get ())->environment),
@@ -1755,6 +1797,7 @@ void nano::wallets::stop ()
 	{
 		thread.join ();
 	}
+	watcher.stop ();
 }
 
 nano::write_transaction nano::wallets::tx_begin_write ()
@@ -1812,23 +1855,42 @@ void nano::wallets::split_if_needed (nano::transaction & transaction_destination
 	auto store_l (dynamic_cast<nano::mdb_store *> (&store_a));
 	if (store_l != nullptr)
 	{
-		auto transaction_source (store_l->tx_begin_write ());
-		auto tx_source = static_cast<MDB_txn *> (transaction_source.get_handle ());
 		if (items.empty ())
 		{
-			auto tx_destination = static_cast<MDB_txn *> (transaction_destination.get_handle ());
 			std::string beginning (nano::uint256_union (0).to_string ());
 			std::string end ((nano::uint256_union (nano::uint256_t (0) - nano::uint256_t (1))).to_string ());
-			nano::store_iterator<std::array<char, 64>, nano::no_value> i (std::make_unique<nano::mdb_iterator<std::array<char, 64>, nano::no_value>> (transaction_source, handle, nano::mdb_val (beginning.size (), const_cast<char *> (beginning.c_str ()))));
-			nano::store_iterator<std::array<char, 64>, nano::no_value> n (std::make_unique<nano::mdb_iterator<std::array<char, 64>, nano::no_value>> (transaction_source, handle, nano::mdb_val (end.size (), const_cast<char *> (end.c_str ()))));
-			for (; i != n; ++i)
+
+			// clang-format off
+			auto get_store_it = [&handle = handle](nano::transaction const & transaction_source, std::string const & hash) {
+				return nano::store_iterator<std::array<char, 64>, nano::no_value> (std::make_unique<nano::mdb_iterator<std::array<char, 64>, nano::no_value>> (transaction_source, handle, nano::mdb_val (hash.size (), const_cast<char *> (hash.c_str ()))));
+			};
+			// clang-format on
+
+			// First do a read pass to check if there are any wallets that need extracting (to save holding a write lock and potentially being blocked)
+			auto wallets_need_splitting (false);
 			{
-				nano::uint256_union id;
-				std::string text (i->first.data (), i->first.size ());
-				auto error1 (id.decode_hex (text));
-				assert (!error1);
-				assert (strlen (text.c_str ()) == text.size ());
-				move_table (text, tx_source, tx_destination);
+				auto transaction_source (store_l->tx_begin_read ());
+				auto i = get_store_it (transaction_source, beginning);
+				auto n = get_store_it (transaction_source, end);
+				wallets_need_splitting = (i != n);
+			}
+
+			if (wallets_need_splitting)
+			{
+				auto transaction_source (store_l->tx_begin_write ());
+				auto i = get_store_it (transaction_source, beginning);
+				auto n = get_store_it (transaction_source, end);
+				auto tx_source = static_cast<MDB_txn *> (transaction_source.get_handle ());
+				auto tx_destination = static_cast<MDB_txn *> (transaction_destination.get_handle ());
+				for (; i != n; ++i)
+				{
+					nano::uint256_union id;
+					std::string text (i->first.data (), i->first.size ());
+					auto error1 (id.decode_hex (text));
+					assert (!error1);
+					assert (strlen (text.c_str ()) == text.size ());
+					move_table (text, tx_source, tx_destination);
+				}
 			}
 		}
 	}
@@ -1900,7 +1962,7 @@ nano::store_iterator<nano::uint256_union, nano::wallet_value> nano::wallet_store
 	return nano::store_iterator<nano::uint256_union, nano::wallet_value> (nullptr);
 }
 nano::mdb_wallets_store::mdb_wallets_store (bool & error_a, boost::filesystem::path const & path_a, int lmdb_max_dbs) :
-environment (error_a, path_a, lmdb_max_dbs, 1ULL * 1024 * 1024 * 1024)
+environment (error_a, path_a, lmdb_max_dbs, false, 1ULL * 1024 * 1024 * 1024)
 {
 }
 MDB_txn * nano::wallet_store::tx (nano::transaction const & transaction_a) const

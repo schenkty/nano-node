@@ -7,12 +7,29 @@
 #include <nano/node/node.hpp>
 #include <nano/node/payment_observer_processor.hpp>
 #include <nano/node/testing.hpp>
+
+#include <boost/lexical_cast.hpp>
+#include <boost/program_options.hpp>
+
 #include <sstream>
 
 #include <argon2.h>
 
-#include <boost/lexical_cast.hpp>
-#include <boost/program_options.hpp>
+// Some builds (mac) fail due to "Boost.Stacktrace requires `_Unwind_Backtrace` function".
+#ifndef _WIN32
+#ifndef _GNU_SOURCE
+#define BEFORE_GNU_SOURCE 0
+#define _GNU_SOURCE
+#else
+#define BEFORE_GNU_SOURCE 1
+#endif
+#endif
+#include <boost/stacktrace.hpp>
+#ifndef _WIN32
+#if !BEFORE_GNU_SOURCE
+#undef _GNU_SOURCE
+#endif
+#endif
 
 namespace
 {
@@ -28,6 +45,13 @@ void update_flags (nano::node_flags & flags_a, boost::program_options::variables
 	flags_a.disable_legacy_bootstrap = (vm.count ("disable_legacy_bootstrap") > 0);
 	flags_a.disable_wallet_bootstrap = (vm.count ("disable_wallet_bootstrap") > 0);
 	flags_a.disable_bootstrap_listener = (vm.count ("disable_bootstrap_listener") > 0);
+	flags_a.disable_tcp_realtime = (vm.count ("disable_tcp_realtime") > 0);
+	flags_a.disable_udp = (vm.count ("disable_udp") > 0);
+	if (flags_a.disable_tcp_realtime && flags_a.disable_udp)
+	{
+		std::cerr << "Flags --disable_tcp_realtime and --disable_udp cannot be used together" << std::endl;
+		std::exit (1);
+	}
 	flags_a.disable_unchecked_cleanup = (vm.count ("disable_unchecked_cleanup") > 0);
 	flags_a.disable_unchecked_drop = (vm.count ("disable_unchecked_drop") > 0);
 	flags_a.fast_bootstrap = (vm.count ("fast_bootstrap") > 0);
@@ -58,7 +82,7 @@ void update_flags (nano::node_flags & flags_a, boost::program_options::variables
 int main (int argc, char * const * argv)
 {
 	nano::set_umask ();
-
+	nano::node_singleton_memory_pool_purge_guard memory_pool_cleanup_guard;
 	boost::program_options::options_description description ("Command line options");
 	nano::add_node_options (description);
 
@@ -71,7 +95,9 @@ int main (int argc, char * const * argv)
 		("disable_lazy_bootstrap", "Disables lazy bootstrap")
 		("disable_legacy_bootstrap", "Disables legacy bootstrap")
 		("disable_wallet_bootstrap", "Disables wallet lazy bootstrap")
-		("disable_bootstrap_listener", "Disables bootstrap listener (incoming connections)")
+		("disable_bootstrap_listener", "Disables bootstrap processing for TCP listener (not including realtime network TCP connections)")
+		("disable_tcp_realtime", "Disables TCP realtime network")
+		("disable_udp", "Disables UDP realtime network")
 		("disable_unchecked_cleanup", "Disables periodic cleanup of old records from unchecked table")
 		("disable_unchecked_drop", "Disables drop of unchecked table at startup")
 		("fast_bootstrap", "Increase bootstrap speed for high end nodes with higher limits")
@@ -90,7 +116,8 @@ int main (int argc, char * const * argv)
 		("debug_opencl", "OpenCL work generation")
 		("debug_profile_verify", "Profile work verification")
 		("debug_profile_kdf", "Profile kdf function")
-		("debug_validate_ledger", "Does various checks on the ledger to make sure it is valid")
+		("debug_output_last_backtrace_dump", "Displays the contents of the latest backtrace in the event of a nano_node crash")
+		("debug_sys_logging", "Test the system logger")
 		("debug_verify_profile", "Profile signature verification")
 		("debug_verify_profile_batch", "Profile batch signature verification")
 		("debug_profile_bootstrap", "Profile bootstrap style blocks processing (at least 10GB of free storage space required)")
@@ -98,6 +125,7 @@ int main (int argc, char * const * argv)
 		("debug_profile_process", "Profile active blocks processing (only for nano_test_network)")
 		("debug_profile_votes", "Profile votes processing (only for nano_test_network)")
 		("debug_random_feed", "Generates output to RNG test suites")
+		("debug_rpc", "Read an RPC command from stdin and invoke it. Network operations will have no effect.")
 		("debug_validate_blocks", "Check all blocks for correct hash, signature, work value")
 		("debug_peers", "Display peer IPv6:port connections")
 		("debug_cemented_block_count", "Displays the number of cemented (confirmed) blocks")
@@ -240,7 +268,7 @@ int main (int argc, char * const * argv)
 			nano::uint128_t total;
 			for (auto i (node.node->store.representation_begin (transaction)), n (node.node->store.representation_end ()); i != n; ++i)
 			{
-				nano::account account (i->first);
+				nano::account const & account (i->first);
 				auto amount (node.node->store.representation_get (transaction, account));
 				total += amount;
 				std::cout << boost::str (boost::format ("%1% %2% %3%\n") % account.to_account () % amount.convert_to<std::string> () % total.convert_to<std::string> ());
@@ -248,7 +276,7 @@ int main (int argc, char * const * argv)
 			std::map<nano::account, nano::uint128_t> calculated;
 			for (auto i (node.node->store.latest_begin (transaction)), n (node.node->store.latest_end ()); i != n; ++i)
 			{
-				nano::account_info info (i->second);
+				nano::account_info const & info (i->second);
 				nano::block_hash rep_block (node.node->ledger.representative_calculated (transaction, info.head));
 				auto block (node.node->store.block_get (transaction, rep_block));
 				calculated[block->representative ()] += info.balance.number ();
@@ -389,6 +417,11 @@ int main (int argc, char * const * argv)
 						std::cerr << "Invalid difficulty\n";
 						result = -1;
 					}
+					else if (difficulty < network_constants.publish_threshold)
+					{
+						std::cerr << "Difficulty below publish threshold\n";
+						result = -1;
+					}
 				}
 				if (!result)
 				{
@@ -453,6 +486,18 @@ int main (int argc, char * const * argv)
 				}
 				auto end1 (std::chrono::high_resolution_clock::now ());
 				std::cerr << boost::str (boost::format ("%|1$ 12d|\n") % std::chrono::duration_cast<std::chrono::microseconds> (end1 - begin1).count ());
+			}
+		}
+		else if (vm.count ("debug_output_last_backtrace_dump"))
+		{
+			if (boost::filesystem::exists ("nano_node_backtrace.dump"))
+			{
+				// There is a backtrace, so output the contents
+				std::ifstream ifs ("nano_node_backtrace.dump");
+
+				boost::stacktrace::stacktrace st = boost::stacktrace::stacktrace::from_dump (ifs);
+				std::cout << "Latest crash backtrace:\n"
+				          << st << std::endl;
 			}
 		}
 		else if (vm.count ("debug_verify_profile"))
@@ -767,7 +812,7 @@ int main (int argc, char * const * argv)
 		{
 			nano::inactive_node node (data_path);
 			auto transaction (node.node->store.tx_begin_read ());
-			std::cerr << boost::str (boost::format ("Performing blocks hash, signature, work validation...\n"));
+			std::cout << boost::str (boost::format ("Performing blocks hash, signature, work validation...\n"));
 			size_t count (0);
 			for (auto i (node.node->store.latest_begin (transaction)), n (node.node->store.latest_end ()); i != n; ++i)
 			{
@@ -776,8 +821,14 @@ int main (int argc, char * const * argv)
 				{
 					std::cout << boost::str (boost::format ("%1% accounts validated\n") % count);
 				}
-				nano::account_info info (i->second);
-				nano::account account (i->first);
+				nano::account_info const & info (i->second);
+				nano::account const & account (i->first);
+
+				if (info.confirmation_height > info.block_count)
+				{
+					std::cerr << "Confirmation height " << info.confirmation_height << " greater than block count " << info.block_count << " for account: " << account.to_account () << std::endl;
+				}
+
 				auto hash (info.open_block);
 				nano::block_hash calculated_hash (0);
 				nano::block_sideband sideband;
@@ -872,8 +923,8 @@ int main (int argc, char * const * argv)
 				{
 					std::cout << boost::str (boost::format ("%1% pending blocks validated\n") % count);
 				}
-				nano::pending_key key (i->first);
-				nano::pending_info info (i->second);
+				nano::pending_key const & key (i->first);
+				nano::pending_info const & info (i->second);
 				// Check block existance
 				auto block (node.node->store.block_get (transaction, key.hash));
 				if (block == nullptr)
@@ -934,8 +985,8 @@ int main (int argc, char * const * argv)
 				std::cout << boost::str (boost::format ("Performing bootstrap emulation, %1% blocks in ledger...") % block_count) << std::endl;
 				for (auto i (node.node->store.latest_begin (transaction)), n (node.node->store.latest_end ()); i != n; ++i)
 				{
-					nano::account account (i->first);
-					nano::account_info info (i->second);
+					nano::account const & account (i->first);
+					nano::account_info const & info (i->second);
 					auto hash (info.head);
 					while (!hash.is_zero ())
 					{
@@ -989,79 +1040,19 @@ int main (int argc, char * const * argv)
 		{
 			nano::inactive_node node (data_path);
 			auto transaction (node.node->store.tx_begin_read ());
-
-			uint64_t sum = 0;
-			for (auto i (node.node->store.latest_begin (transaction)), n (node.node->store.latest_end ()); i != n; ++i)
-			{
-				nano::account_info info (i->second);
-				sum += info.confirmation_height;
-			}
-			std::cout << "Total cemented block count: " << sum << std::endl;
+			std::cout << "Total cemented block count: " << node.node->store.cemented_count (transaction) << std::endl;
 		}
-		else if (vm.count ("debug_validate_ledger"))
+		else if (vm.count ("debug_sys_logging"))
 		{
-			// This checks some issues (can be extended):
-			// 1 - Compares account block count with head sideband height
-			// 2 - Deserialization works for all blocks (might just cause a crash)
-			// 3 - Confirmation height is not greater than account block count
-			// 4 - Account head is not a zero hash
-			std::cout << "Validating ledger, this can take a long time... " << std::endl;
-
-			nano::inactive_node node (data_path);
-			auto transaction (node.node->store.tx_begin_read ());
-			for (auto i (node.node->store.latest_begin (transaction)), n (node.node->store.latest_end ()); i != n && result == 0; ++i)
+#ifdef BOOST_WINDOWS
+			if (!nano::event_log_reg_entry_exists () && !nano::is_windows_elevated ())
 			{
-				auto const & account = i->first;
-				auto const & account_info = i->second;
-
-				auto account_height = account_info.block_count;
-				if (account_height == 0)
-				{
-					std::cerr << "Invalid block height for " << account.to_account () << std::endl;
-					result = -1;
-					break;
-				}
-
-				if (account_info.confirmation_height > account_info.block_count)
-				{
-					std::cerr << "Confirmation height " << account_info.confirmation_height << " greater than block count " << account_info.block_count << " for account: " << account.to_account () << std::endl;
-					result = -1;
-					break;
-				}
-
-				auto head_hash = account_info.head;
-				if (head_hash.is_zero ())
-				{
-					std::cerr << "Invalid frontier block for " << account.to_account () << std::endl;
-					result = -1;
-					break;
-				}
-
-				nano::block_sideband sideband;
-				auto block = node.node->store.block_get (transaction, head_hash, &sideband);
-				if (sideband.height != account_height)
-				{
-					std::cerr << "Sideband height for head block " << sideband.height << " does not match account block count " << account_height << " for account  " << account.to_account () << std::endl;
-					result = -1;
-					break;
-				}
-
-				// Loop over all blocks in account chain to make sure they can be processed
-				auto hash = head_hash;
-				while (!hash.is_zero ())
-				{
-					block = node.node->store.block_get (transaction, hash);
-
-					if (!block)
-					{
-						std::cerr << "Could not get block hash " << hash.to_string () << std::endl;
-						result = -1;
-						break;
-					}
-					hash = block->previous ();
-				}
+				std::cerr << "The event log requires the HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\EventLog\\Nano\\Nano registry entry, run again as administator to create it.\n";
+				return 1;
 			}
-			std::cout << "No errors detected" << std::endl;
+#endif
+			nano::inactive_node node (data_path);
+			node.node->logger.always_log (nano::severity_level::error, "Testing system logger");
 		}
 		else if (vm.count ("version"))
 		{
